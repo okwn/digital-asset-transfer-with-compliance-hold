@@ -1,0 +1,123 @@
+-- Asset.daml
+-- Asset domain types and template for digital asset holdings.
+
+module Asset where
+
+-- =============================================================================
+-- DOMAIN TYPES
+-- =============================================================================
+
+data AssetCategory
+    = Equity
+    | Bond
+    | Token
+    | Derivative
+    | Fund
+    | Other Text
+    deriving (Eq, Show)
+
+data Jurisdiction
+    = US
+    | EU
+    | UK
+    | APAC
+    | OtherRegion Text
+    deriving (Eq, Show)
+
+data TransferPurpose
+    = Sale
+    | Pledge
+    | MarginCall
+    | CorporateAction
+    | Rebalancing
+    | CollateralTransfer
+    | OtherPurpose Text
+    deriving (Eq, Show)
+
+-- =============================================================================
+-- ASSET HOLDING
+-- =============================================================================
+
+template AssetHolding
+    with
+        owner : Party
+        assetId : Text
+        assetType : Text
+        quantity : Decimal
+        issuer : Party
+        metadata : Text
+        assetCategory : AssetCategory
+        jurisdiction : Jurisdiction
+        riskFlag : Bool
+        createdAt : Time
+    where
+        signatory owner
+        observer issuer
+
+        choice RequestTransfer : ContractId TransferRequest
+            with
+                recipient : Party
+                complianceOfficer : Party
+                reason : Text
+                requestId : Text
+                transferPurpose : TransferPurpose
+                complianceCaseReference : Optional Text
+                requestTimestamp : Time
+            controller owner
+            do
+                create TransferRequest
+                    with
+                        owner = owner
+                        recipient = recipient
+                        complianceOfficer = complianceOfficer
+                        assetId = assetId
+                        assetType = assetType
+                        quantity = quantity
+                        issuer = issuer
+                        reason = reason
+                        requestId = requestId
+                        transferPurpose = transferPurpose
+                        complianceCaseReference = complianceCaseReference
+                        assetCategory = assetCategory
+                        jurisdiction = jurisdiction
+                        riskFlag = riskFlag
+                        assetHoldingCid = self
+                        createdAt = requestTimestamp
+
+        choice ArchiveHolding : ()
+            controller owner
+            do pure ()
+
+-- =============================================================================
+-- ASSET HELPERS
+-- =============================================================================
+
+validateQuantity : Decimal -> Bool
+validateQuantity q = q > 0.0
+
+validateAssetId : Text -> Bool
+validateAssetId a = not (Text.isEmpty a)
+
+showAssetCategory : AssetCategory -> Text
+showAssetCategory Equity = "Equity"
+showAssetCategory Bond = "Bond"
+showAssetCategory Token = "Token"
+showAssetCategory Derivative = "Derivative"
+showAssetCategory Fund = "Fund"
+showAssetCategory (Other t) = t
+
+showJurisdiction : Jurisdiction -> Text
+showJurisdiction US = "US"
+showJurisdiction EU = "EU"
+showJurisdiction UK = "UK"
+showJurisdiction APAC = "APAC"
+showJurisdiction (OtherRegion t) = t
+
+showTransferPurpose : TransferPurpose -> Text
+showTransferPurpose Sale = "Sale"
+showTransferPurpose Pledge = "Pledge"
+showTransferPurpose MarginCall = "Margin Call"
+showTransferPurpose CorporateAction = "Corporate Action"
+showTransferPurpose Rebalancing = "Rebalancing"
+showTransferPurpose CollateralTransfer = "Collateral Transfer"
+showTransferPurpose (OtherPurpose t) = t

@@ -3,5 +3,16 @@
 
 module Types where
 
--- Note: Custom types used in this project are defined directly within
--- their respective templates for clarity. See TransferWorkflow.daml.
+-- | Transfer request status tracking
+data TransferStatus
+    = Pending
+    | UnderReview
+    | Approved
+    | Rejected Text
+    deriving (Eq, Show)
+
+-- | Check result for compliance verification
+data CheckResult
+    = Pass
+    | Fail Text
+    deriving (Eq, Show)

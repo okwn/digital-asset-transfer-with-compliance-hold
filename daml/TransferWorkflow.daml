@@ -1,74 +1,16 @@
 -- TransferWorkflow.daml
--- Core domain templates for compliance-gated asset transfers.
+-- Workflow orchestration for compliance-gated asset transfers.
+-- Contains TransferRequest, approval/rejection/cancellation choices.
 
 module TransferWorkflow where
 
-import Types
-
--- =============================================================================
--- ASSET HOLDING
--- =============================================================================
--- Represents a digital asset held by an owner on the ledger.
--- The owner signatory controls the asset and can initiate transfer requests.
--- Archivization occurs when a transfer is completed after compliance approval.
-
-template AssetHolding
-    with
-        owner : Party
-        assetId : Text
-        assetType : Text
-        quantity : Decimal
-        issuer : Party
-        metadata : Text
-    where
-        signatory owner
-        observer issuer
-
-        -- =========================================================================
-        -- REQUEST TRANSFER
-        -- =========================================================================
-        -- Pre-settlement compliance-gated transfer request.
-        -- The owner initiates a transfer to a recipient, designating a compliance
-        -- officer for review. The original AssetHolding remains active until the
-        -- compliance review is completed and the transfer is approved.
-        --
-        -- This choice does NOT archive the holding. Settlement occurs only after
-        -- compliance approval and explicit transfer completion in a later step.
-        choice RequestTransfer : ContractId TransferRequest
-            with
-                recipient : Party
-                complianceOfficer : Party
-                reason : Text
-                requestId : Text
-            controller owner
-            do
-                create TransferRequest
-                    with
-                        owner = owner
-                        recipient = recipient
-                        complianceOfficer = complianceOfficer
-                        assetId = assetId
-                        assetType = assetType
-                        quantity = quantity
-                        issuer = issuer
-                        reason = reason
-                        requestId = requestId
-
-        -- =========================================================================
-        -- ARCHIVE HOLDING
-        -- =========================================================================
-        -- Mechanical choice to archive this contract during settlement.
-        -- Only exercised by the approval workflow, not by business logic.
-        choice ArchiveHolding : ()
-            controller owner
-            do pure ()
+import Asset
+import Compliance
+import Settlement
 
 -- =============================================================================
 -- TRANSFER REQUEST
 -- =============================================================================
--- Created by the asset owner to request transfer to a recipient.
--- The complianceOfficer field designates who must review and approve.
--- The request remains pending until compliance completes its review.
 
 template TransferRequest
     with
@@ -81,6 +23,13 @@ template TransferRequest
         issuer : Party
         reason : Text
         requestId : Text
+        transferPurpose : TransferPurpose
+        complianceCaseReference : Optional Text
+        assetCategory : AssetCategory
+        jurisdiction : Jurisdiction
+        riskFlag : Bool
+        assetHoldingCid : ContractId AssetHolding
+        createdAt : Time
     where
         signatory owner
         observer recipient
@@ -89,25 +38,14 @@ template TransferRequest
         -- =========================================================================
         -- START COMPLIANCE REVIEW
         -- =========================================================================
-        -- Records the compliance officer's review of this transfer request.
-        -- Creates an immutable ComplianceReview artifact tied to the request.
-        -- The TransferRequest remains active; this choice captures review evidence
-        -- on-ledger before any settlement decision is made.
-        --
-        -- KYC: Know Your Customer verification completed for both parties.
-        -- Transfer Limit: Recipient's allowable limit not exceeded.
-        -- Blacklist Check: Neither party appears on sanctions/restricted lists.
-        --
-        -- Parameters assetHoldingCid and transferRequestCid are stored in the
-        -- ComplianceReview so the approval choice can archive these contracts.
         choice StartComplianceReview : ContractId ComplianceReview
             with
                 kycConfirmed : Bool
                 transferLimitOk : Bool
                 blacklistCheckPassed : Bool
+                sanctionsCheckPassed : Bool
+                regulatoryApprovalObtained : Bool
                 notes : Text
-                assetHoldingCid : ContractId AssetHolding
-                transferRequestCid : ContractId TransferRequest
             controller complianceOfficer
             do
                 create ComplianceReview
@@ -120,53 +58,15 @@ template TransferRequest
                         assetType = assetType
                         quantity = quantity
                         issuer = issuer
+                        assetCategory = assetCategory
+                        jurisdiction = jurisdiction
+                        riskFlag = riskFlag
                         kycConfirmed = kycConfirmed
                         transferLimitOk = transferLimitOk
                         blacklistCheckPassed = blacklistCheckPassed
+                        sanctionsCheckPassed = sanctionsCheckPassed
+                        regulatoryApprovalObtained = regulatoryApprovalObtained
                         notes = notes
-                        assetHoldingCid = assetHoldingCid
-                        transferRequestCid = transferRequestCid
-
-        -- =========================================================================
-        -- ARCHIVE REQUEST
-        -- =========================================================================
-        -- Mechanical choice to archive this contract during settlement.
-        -- Only exercised by the approval or rejection workflow.
-        choice ArchiveRequest : ()
-            controller owner
-            do pure ()
-
--- =============================================================================
--- COMPLIANCE REVIEW
--- =============================================================================
--- Created by the compliance officer to record the review outcome.
--- Tracks KYC, transfer limits, and blacklist checks.
--- Notes field allows compliance reasoning to be recorded on-ledger.
---
--- The assetHoldingCid and transferRequestCid fields are references to the
--- contracts involved in this transfer, enabling the approval choice to
--- archive them upon successful compliance clearance.
-
-template ComplianceReview
-    with
-        owner : Party
-        recipient : Party
-        complianceOfficer : Party
-        requestId : Text
-        assetId : Text
-        assetType : Text
-        quantity : Decimal
-        issuer : Party
-        kycConfirmed : Bool
-        transferLimitOk : Bool
-        blacklistCheckPassed : Bool
-        notes : Text
-        assetHoldingCid : ContractId AssetHolding
-        transferRequestCid : ContractId TransferRequest
-    where
-        signatory complianceOfficer
-        observer owner
-        observer recipient
 
         -- =========================================================================
         -- APPROVE TRANSFER
@@ -174,36 +74,37 @@ template ComplianceReview
         -- Settles the transfer after compliance approval.
         --
         -- COMPLIANCE-GATED SETTLEMENT RULE:
-        -- Approval is only permitted when ALL compliance checks pass:
+        -- Approval is only permitted when ALL mandatory checks pass:
         --   - kycConfirmed == True
         --   - transferLimitOk == True
         --   - blacklistCheckPassed == True
-        --
-        -- If any check fails, this choice must NOT be exercised.
-        -- Instead, use RejectTransfer to close the workflow cleanly.
+        --   - sanctionsCheckPassed == True
         --
         -- On approval:
-        --   1. Archives the original AssetHolding (using assetHoldingCid)
-        --   2. Archives the TransferRequest (using transferRequestCid)
+        --   1. Archives the original AssetHolding
+        --   2. Archives this TransferRequest
         --   3. Creates a new AssetHolding for the recipient
         --   4. Creates a CompletedTransfer audit record
-        choice ApproveTransfer : (ContractId AssetHolding, ContractId CompletedTransfer)
+        --   5. Creates a ComplianceDecisionLog entry
+        choice ApproveTransfer : (ContractId AssetHolding, ContractId CompletedTransfer, ContractId ComplianceDecisionLog)
             with
+                complianceReviewCid : ContractId ComplianceReview
                 settlementNote : Text
+                settlementTimestamp : Time
+                settlementReference : Text
+                decisionReference : Text
             controller complianceOfficer
             do
-                -- Enforce compliance-gated settlement rule
-                assert (kycConfirmed == True)
-                assert (transferLimitOk == True)
-                assert (blacklistCheckPassed == True)
+                complianceReview <- fetch complianceReviewCid
 
-                -- Archive the original holding
-                archiveAssetHolding <- exercise assetHoldingCid ArchiveHolding
+                assert (complianceReview.kycConfirmed == True) "KYC check must pass"
+                assert (complianceReview.transferLimitOk == True) "Transfer limit check must pass"
+                assert (complianceReview.blacklistCheckPassed == True) "Blacklist check must pass"
+                assert (complianceReview.sanctionsCheckPassed == True) "Sanctions check must pass"
 
-                -- Archive the transfer request
-                archiveTransferRequest <- exercise transferRequestCid ArchiveRequest
+                exercise assetHoldingCid ArchiveHolding
+                exercise self ArchiveRequest
 
-                -- Create new holding for recipient
                 newHolding <- create AssetHolding
                     with
                         owner = recipient
@@ -211,9 +112,11 @@ template ComplianceReview
                         assetType = assetType
                         quantity = quantity
                         issuer = issuer
-                        metadata = notes
+                        metadata = complianceReview.notes
+                        assetCategory = assetCategory
+                        jurisdiction = jurisdiction
+                        riskFlag = riskFlag
 
-                -- Create audit record
                 completed <- create CompletedTransfer
                     with
                         previousOwner = owner
@@ -225,67 +128,106 @@ template ComplianceReview
                         issuer = issuer
                         requestId = requestId
                         settlementNote = settlementNote
+                        assetCategory = assetCategory
+                        jurisdiction = jurisdiction
+                        settlementTimestamp = settlementTimestamp
+                        settlementReference = settlementReference
 
-                pure (newHolding, completed)
+                decisionLog <- create ComplianceDecisionLog
+                    with
+                        complianceOfficer = complianceOfficer
+                        owner = owner
+                        recipient = recipient
+                        requestId = requestId
+                        assetId = assetId
+                        decision = Approved
+                        decisionTimestamp = settlementTimestamp
+                        decisionReference = decisionReference
+                        notes = settlementNote
+
+                pure (newHolding, completed, decisionLog)
 
         -- =========================================================================
         -- REJECT TRANSFER
         -- =========================================================================
-        -- Closes the transfer workflow without settlement.
-        -- The original AssetHolding remains active; no new holding is created.
-        -- Use this when compliance cannot approve the transfer.
-        choice RejectTransfer : ContractId RejectedTransfer
+        -- Closes the transfer workflow without settlement due to compliance failure.
+        --
+        -- Creates a RejectedTransfer audit record and a ComplianceDecisionLog entry.
+        -- The original AssetHolding remains active.
+        choice RejectTransfer : (ContractId RejectedTransfer, ContractId ComplianceDecisionLog)
             with
+                complianceReviewCid : ContractId ComplianceReview
                 rejectionReason : Text
+                rejectionTimestamp : Time
+                rejectionReference : Text
+                decisionReference : Text
             controller complianceOfficer
             do
-                -- Archive the transfer request
-                _ <- exercise transferRequestCid ArchiveRequest
+                complianceReview <- fetch complianceReviewCid
 
-                -- Create rejection record for audit
-                create RejectedTransfer
+                exercise self ArchiveRequest
+
+                rejected <- create RejectedTransfer
                     with
                         owner = owner
                         recipient = recipient
                         complianceOfficer = complianceOfficer
+                        assetId = assetId
+                        assetType = assetType
+                        quantity = quantity
+                        issuer = issuer
+                        requestId = requestId
+                        rejectionReason = rejectionReason
+                        rejectionTimestamp = rejectionTimestamp
+                        rejectionReference = rejectionReference
+                        complianceReviewNotes = complianceReview.notes
+
+                decisionLog <- create ComplianceDecisionLog
+                    with
+                        complianceOfficer = complianceOfficer
+                        owner = owner
+                        recipient = recipient
                         requestId = requestId
                         assetId = assetId
-                        rejectionReason = rejectionReason
+                        decision = Rejected rejectionReason
+                        decisionTimestamp = rejectionTimestamp
+                        decisionReference = decisionReference
+                        notes = complianceReview.notes
 
--- =============================================================================
--- COMPLETED TRANSFER
--- =============================================================================
--- Records a successful transfer for audit and settlement confirmation.
--- Tri-party signatory: previous owner, new owner, and compliance officer.
--- This is the immutable record that the transfer was settled after approval.
+                pure (rejected, decisionLog)
 
-template CompletedTransfer
-    with
-        previousOwner : Party
-        newOwner : Party
-        complianceOfficer : Party
-        assetId : Text
-        assetType : Text
-        quantity : Decimal
-        issuer : Party
-        requestId : Text
-        settlementNote : Text
-    where
-        signatory previousOwner, newOwner, complianceOfficer
+        -- =========================================================================
+        -- CANCEL TRANSFER
+        -- =========================================================================
+        -- Owner-initiated cancellation of a pending transfer request.
+        -- Use when the owner no longer wishes to transfer the asset.
+        -- Only available before compliance makes a decision.
+        --
+        -- Creates a TransferCancellation audit record.
+        -- The original AssetHolding remains active.
+        choice CancelTransfer : ContractId TransferCancellation
+            with
+                cancellationReason : Text
+                cancellationTimestamp : Time
+                cancellationReference : Text
+            controller owner
+            do
+                exercise self ArchiveRequest
 
--- =============================================================================
--- REJECTED TRANSFER
--- =============================================================================
--- Records a rejected transfer for audit trail.
--- Shows the transfer was reviewed and rejected per compliance policy.
+                create TransferCancellation
+                    with
+                        owner = owner
+                        recipient = recipient
+                        complianceOfficer = complianceOfficer
+                        assetId = assetId
+                        requestId = requestId
+                        cancellationReason = cancellationReason
+                        cancellationTimestamp = cancellationTimestamp
+                        cancellationReference = cancellationReference
 
-template RejectedTransfer
-    with
-        owner : Party
-        recipient : Party
-        complianceOfficer : Party
-        requestId : Text
-        assetId : Text
-        rejectionReason : Text
-    where
-        signatory complianceOfficer
+        -- =========================================================================
+        -- ARCHIVE REQUEST
+        -- =========================================================================
+        choice ArchiveRequest : ()
+            controller owner
+            do pure ()

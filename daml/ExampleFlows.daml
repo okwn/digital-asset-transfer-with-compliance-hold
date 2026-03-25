@@ -1,0 +1,371 @@
+-- ExampleFlows.daml
+-- Specific example flows demonstrating the compliance-gated transfer workflow.
+-- These flows show step-by-step how parties interact with the ledger.
+
+module ExampleFlows where
+
+import Daml.Script
+import Asset
+import Compliance
+import Settlement
+import TransferWorkflow
+import WorkflowHelpers
+
+-- =============================================================================
+-- FLOW 1: SIMPLE EQUITY TRANSFER
+-- =============================================================================
+-- A basic equity transfer from one party to another.
+-- Shows the minimum required fields for a compliant transfer.
+
+flowSimpleEquityTransfer : Script ()
+flowSimpleEquityTransfer = do
+    issuer <- allocateParty "CorpIssuer"
+    seller <- allocateParty "Seller"
+    buyer <- allocateParty "Buyer"
+    compliance <- allocateParty "ComplianceTeam"
+
+    now <- getTime
+
+    -- Issuer creates shares for the seller
+    holdingCid <- submit issuer do
+        createCmd AssetHolding
+            with
+                owner = seller
+                assetId = "SHARES-AAPL-001"
+                assetType = "Common Stock"
+                quantity = 50.0
+                issuer = issuer
+                metadata = "AAPL common shares"
+                assetCategory = Equity
+                jurisdiction = US
+                riskFlag = False
+                createdAt = now
+
+    -- Seller initiates transfer to buyer
+    requestCid <- submit seller do
+        exerciseCmd holdingCid RequestTransfer
+            with
+                recipient = buyer
+                complianceOfficer = compliance
+                reason = "Sale of shares"
+                requestId = "EQ-US-001"
+                transferPurpose = Sale
+                complianceCaseReference = None
+                requestTimestamp = now
+
+    -- Compliance reviews and approves
+    reviewCid <- submit compliance do
+        exerciseCmd requestCid StartComplianceReview
+            with
+                kycConfirmed = True
+                transferLimitOk = True
+                blacklistCheckPassed = True
+                sanctionsCheckPassed = True
+                regulatoryApprovalObtained = True
+                notes = "Standard equity transfer. All checks verified."
+
+    (newHoldingCid, completedCid, _) <- submit compliance do
+        exerciseCmd requestCid ApproveTransfer
+            with
+                complianceReviewCid = reviewCid
+                settlementNote = "Equity transfer completed"
+                settlementTimestamp = now
+                settlementReference = "SET-EQ-001"
+                decisionReference = "DEC-EQ-001"
+
+    -- Verify settlement
+    completed <- query @CompletedTransfer buyer
+    assert (length completed == 1) <?> "Completed transfer must exist"
+
+    pure ()
+
+-- =============================================================================
+-- FLOW 2: COLLATERAL TRANSFER WITH RISK FLAG
+-- =============================================================================
+-- A collateral transfer for margin purposes with a risk flag.
+-- Demonstrates how higher-risk transfers are handled.
+
+flowCollateralTransfer : Script ()
+flowCollateralTransfer = do
+    issuer <- allocateParty "PrimeBroker"
+    marginHolder <- allocateParty "MarginAccount"
+    collateralRecipient <- allocateParty "MarginCredit"
+    compliance <- allocateParty "ComplianceTeam"
+
+    now <- getTime
+
+    -- Create a collateral asset marked as risk
+    holdingCid <- submit issuer do
+        createCmd AssetHolding
+            with
+                owner = marginHolder
+                assetId = "COLLATERAL-USDC-001"
+                assetType = "USD Stablecoin"
+                quantity = 50000.0
+                issuer = issuer
+                metadata = "USDC collateral for margin account"
+                assetCategory = Token
+                jurisdiction = US
+                riskFlag = True
+                createdAt = now
+
+    -- Request collateral transfer for margin call
+    requestCid <- submit marginHolder do
+        exerciseCmd holdingCid RequestTransfer
+            with
+                recipient = collateralRecipient
+                complianceOfficer = compliance
+                reason = "Margin call - collateral transfer to credit account"
+                requestId = "COLL-USDC-001"
+                transferPurpose = MarginCall
+                complianceCaseReference = Some "MARGIN-REF-001"
+                requestTimestamp = now
+
+    -- Enhanced review for collateral
+    reviewCid <- submit compliance do
+        exerciseCmd requestCid StartComplianceReview
+            with
+                kycConfirmed = True
+                transferLimitOk = True
+                blacklistCheckPassed = True
+                sanctionsCheckPassed = True
+                regulatoryApprovalObtained = True
+                notes = "Margin call collateral. Risk flag active. Enhanced monitoring applied."
+
+    (newHoldingCid, completedCid, _) <- submit compliance do
+        exerciseCmd requestCid ApproveTransfer
+            with
+                complianceReviewCid = reviewCid
+                settlementNote = "Margin collateral transferred"
+                settlementTimestamp = now
+                settlementReference = "SET-COLL-001"
+                decisionReference = "DEC-COLL-001"
+
+    completed <- query @CompletedTransfer collateralRecipient
+    assert (length completed == 1) <?> "Collateral transfer must complete"
+
+    pure ()
+
+-- =============================================================================
+-- FLOW 3: CROSS-BORDER BOND TRANSFER (EU)
+-- =============================================================================
+-- A cross-border bond transfer requiring regulatory approval.
+
+flowCrossBorderBondTransfer : Script ()
+flowCrossBorderBondTransfer = do
+    issuer <- allocateParty "EuropeanBank"
+    bondHolder <- allocateParty "GermanFund"
+    newHolder <- allocateParty "FrenchFund"
+    compliance <- allocateParty "EUCompliance"
+
+    now <- getTime
+
+    -- German fund holds EU-regulated bond
+    holdingCid <- submit issuer do
+        createCmd AssetHolding
+            with
+                owner = bondHolder
+                assetId = "BOND-EU-2024-001"
+                assetType = "Corporate Bond"
+                quantity = 1000.0
+                issuer = issuer
+                metadata = "BBB-rated corporate bond"
+                assetCategory = Bond
+                jurisdiction = EU
+                riskFlag = False
+                createdAt = now
+
+    -- Request cross-border transfer
+    requestCid <- submit bondHolder do
+        exerciseCmd holdingCid RequestTransfer
+            with
+                recipient = newHolder
+                complianceOfficer = compliance
+                reason = "Fund rebalancing - switch to different bond exposure"
+                requestId = "BOND-EU-2024-001"
+                transferPurpose = Rebalancing
+                complianceCaseReference = Some "EU-REG-2024-001"
+                requestTimestamp = now
+
+    -- EU compliance review
+    reviewCid <- submit compliance do
+        exerciseCmd requestCid StartComplianceReview
+            with
+                kycConfirmed = True
+                transferLimitOk = True
+                blacklistCheckPassed = True
+                sanctionsCheckPassed = True
+                regulatoryApprovalObtained = True
+                notes = "Cross-border EU bond transfer. MiFID compliance verified."
+
+    (newHoldingCid, completedCid, _) <- submit compliance do
+        exerciseCmd requestCid ApproveTransfer
+            with
+                complianceReviewCid = reviewCid
+                settlementNote = "EU cross-border bond transfer approved"
+                settlementTimestamp = now
+                settlementReference = "SET-BOND-EU-001"
+                decisionReference = "DEC-BOND-EU-001"
+
+    completed <- query @CompletedTransfer newHolder
+    assert (length completed == 1) <?> "Bond transfer must complete"
+
+    pure ()
+
+-- =============================================================================
+-- FLOW 4: TOKEN TRANSFER WITH BLACKLIST FAILURE
+-- =============================================================================
+-- A token transfer blocked by blacklist screening.
+
+flowTokenTransferBlacklistFailure : Script ()
+flowTokenTransferBlacklistFailure = do
+    issuer <- allocateParty "TokenIssuer"
+    tokenHolder <- allocateParty "TokenHolder"
+    newRecipient <- allocateParty "BlacklistedParty"
+    compliance <- allocateParty "ComplianceTeam"
+
+    now <- getTime
+
+    holdingCid <- submit issuer do
+        createCmd AssetHolding
+            with
+                owner = tokenHolder
+                assetId = "UTILITY-TOKEN-001"
+                assetType = "Utility Token"
+                quantity = 10000.0
+                issuer = issuer
+                metadata = "Platform utility token"
+                assetCategory = Token
+                jurisdiction = US
+                riskFlag = False
+                createdAt = now
+
+    requestCid <- submit tokenHolder do
+        exerciseCmd holdingCid RequestTransfer
+            with
+                recipient = newRecipient
+                complianceOfficer = compliance
+                reason = "Token sale"
+                requestId = "TOKEN-REJ-001"
+                transferPurpose = Sale
+                complianceCaseReference = None
+                requestTimestamp = now
+
+    reviewCid <- submit compliance do
+        exerciseCmd requestCid StartComplianceReview
+            with
+                kycConfirmed = True
+                transferLimitOk = True
+                blacklistCheckPassed = False
+                sanctionsCheckPassed = True
+                regulatoryApprovalObtained = True
+                notes = "Recipient address appears on internal blacklist."
+
+    (rejectedCid, _) <- submit compliance do
+        exerciseCmd requestCid RejectTransfer
+            with
+                complianceReviewCid = reviewCid
+                rejectionReason = "Recipient is on internal blacklist - token transfer prohibited"
+                rejectionTimestamp = now
+                rejectionReference = "REJ-TOKEN-001"
+                decisionReference = "DEC-TOKEN-001"
+
+    -- Verify original holding unchanged
+    originalHolding <- queryContractId tokenHolder holdingCid
+    assert (originalHolding /= None) <?> "Original holding must remain"
+
+    rejected <- query @RejectedTransfer compliance
+    assert (length rejected == 1) <?> "Rejection must be recorded"
+
+    pure ()
+
+-- =============================================================================
+-- FLOW 5: CORPORATE ACTION DISTRIBUTION
+-- =============================================================================
+-- A corporate action distributing shares to shareholders.
+
+flowCorporateActionDistribution : Script ()
+flowCorporateActionDistribution = do
+    issuer <- allocateParty "PublicCorp"
+    shareholder <- allocateParty "Shareholder"
+    compliance <- allocateParty "TransferAgent"
+
+    now <- getTime
+
+    holdingCid <- submit issuer do
+        createCmd AssetHolding
+            with
+                owner = shareholder
+                assetId = "DIVIDEND-SHARE-001"
+                assetType = "Common Stock"
+                quantity = 100.0
+                issuer = issuer
+                metadata = "Shares received as stock dividend"
+                assetCategory = Equity
+                jurisdiction = US
+                riskFlag = False
+                createdAt = now
+
+    requestCid <- submit shareholder do
+        exerciseCmd holdingCid RequestTransfer
+            with
+                recipient = shareholder
+                complianceOfficer = compliance
+                reason = "Corporate action - stock dividend reinvestment"
+                requestId = "CA-DIV-001"
+                transferPurpose = CorporateAction
+                complianceCaseReference = Some "CORP-ACTION-2024-001"
+                requestTimestamp = now
+
+    reviewCid <- submit compliance do
+        exerciseCmd requestCid StartComplianceReview
+            with
+                kycConfirmed = True
+                transferLimitOk = True
+                blacklistCheckPassed = True
+                sanctionsCheckPassed = True
+                regulatoryApprovalObtained = True
+                notes = "Corporate action distribution - no change in beneficial ownership."
+
+    (newHoldingCid, completedCid, _) <- submit compliance do
+        exerciseCmd requestCid ApproveTransfer
+            with
+                complianceReviewCid = reviewCid
+                settlementNote = "Corporate action distribution completed"
+                settlementTimestamp = now
+                settlementReference = "SET-CA-001"
+                decisionReference = "DEC-CA-001"
+
+    completed <- query @CompletedTransfer shareholder
+    assert (length completed == 1) <?> "Corporate action must complete"
+
+    pure ()
+
+-- =============================================================================
+-- RUN ALL FLOWS
+-- =============================================================================
+
+runAllFlows : Script ()
+runAllFlows = do
+    putStrLn "--- Flow 1: Simple Equity Transfer ---"
+    flowSimpleEquityTransfer
+    putStrLn "PASSED"
+
+    putStrLn "--- Flow 2: Collateral Transfer with Risk Flag ---"
+    flowCollateralTransfer
+    putStrLn "PASSED"
+
+    putStrLn "--- Flow 3: Cross-Border Bond Transfer (EU) ---"
+    flowCrossBorderBondTransfer
+    putStrLn "PASSED"
+
+    putStrLn "--- Flow 4: Token Transfer with Blacklist Failure ---"
+    flowTokenTransferBlacklistFailure
+    putStrLn "PASSED"
+
+    putStrLn "--- Flow 5: Corporate Action Distribution ---"
+    flowCorporateActionDistribution
+    putStrLn "PASSED"
+
+    putStrLn "All flows completed."
+    pure ()

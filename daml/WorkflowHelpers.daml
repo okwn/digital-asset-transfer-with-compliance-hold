@@ -1,0 +1,71 @@
+-- WorkflowHelpers.daml
+-- Reusable helper functions for the transfer workflow.
+
+module WorkflowHelpers where
+
+-- =============================================================================
+-- REQUEST REFERENCE HELPERS
+-- =============================================================================
+
+formatRequestReference : Text -> Text -> Text
+formatRequestReference prefix requestId = prefix <> "-" <> requestId
+
+isValidRequestId : Text -> Bool
+isValidRequestId reqId =
+    not (Text.isEmpty reqId) && Text.length reqId >= 3
+
+defaultTransferReason : TransferPurpose -> Text
+defaultTransferReason Sale = "Sale of asset"
+defaultTransferReason Pledge = "Asset pledged as collateral"
+defaultTransferReason MarginCall = "Margin call fulfillment"
+defaultTransferReason CorporateAction = "Corporate action settlement"
+defaultTransferReason Rebalancing = "Portfolio rebalancing"
+defaultTransferReason CollateralTransfer = "Collateral movement"
+defaultTransferReason (OtherPurpose t) = t
+
+-- =============================================================================
+-- TEXT HELPERS
+-- =============================================================================
+
+truncateText : Int -> Text -> Text
+truncateText maxLen text =
+    if Text.length text <= maxLen
+    then text
+    else Text.take (maxLen - 3) text <> "..."
+
+padText : Int -> Text -> Text
+padText len text =
+    if Text.length text >= len
+    then Text.take len text
+    else text <> Text.replicate (len - Text.length text) " "
+
+-- =============================================================================
+-- VALIDATION HELPERS
+-- =============================================================================
+
+validateDifferentParties : Party -> Party -> Bool
+validateDifferentParties a b = a /= b
+
+validateTransferRequest : Party -> Party -> Text -> Bool
+validateTransferRequest owner recipient requestId =
+    validateDifferentParties owner recipient && isValidRequestId requestId
+
+-- =============================================================================
+-- DISPLAY HELPERS
+-- =============================================================================
+
+showParty : Party -> Text
+showParty (Party p) = p
+
+showQuantity : Decimal -> Text
+showQuantity q = show q
+
+-- =============================================================================
+-- REFERENCE ID GENERATION
+-- =============================================================================
+
+generateRefSuffix : Int -> Text
+generateRefSuffix n = show n
+
+makeComplianceCaseRef : Text -> Text -> Text
+makeComplianceCaseRef requestId officerId = "CC-" <> requestId <> "-" <> officerId

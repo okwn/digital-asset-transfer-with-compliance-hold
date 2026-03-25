@@ -4,7 +4,7 @@ A DAML sample project implementing a compliance-gated asset transfer workflow wh
 
 ## Summary
 
-In this model, an asset transfer is a multi-step process: the owner declares intent via a `TransferRequest`, the compliance officer reviews and records the outcome via a `ComplianceReview`, and only upon approval does settlement occur. The original `AssetHolding` is archived and a new one is created for the recipient. Rejection closes the request without settlement.
+In this model, an asset transfer is a multi-step process: the owner declares intent via a `TransferRequest`, the compliance officer reviews and records the outcome via a `ComplianceReview`, and only upon approval does settlement occur. The original `AssetHolding` is archived and a new one is created for the recipient. Rejection or cancellation closes the request without settlement.
 
 ## Why This Matters
 
@@ -19,76 +19,87 @@ DAML enforces this workflow at the ledger level. The compliance gate is not advi
 
 ## Core Contracts
 
-| Contract | Purpose |
-|----------|---------|
-| `AssetHolding` | Represents a digital asset held by an owner. Signatory: owner. |
-| `TransferRequest` | Declares intent to transfer. Created by owner. Observer: recipient, compliance officer. |
-| `ComplianceReview` | Records compliance officer's review checks. Signatory: compliance officer. |
-| `CompletedTransfer` | Audit record of a settled transfer. Tri-party signatories. |
-| `RejectedTransfer` | Audit record of a rejected transfer. |
+| Contract | Module | Purpose |
+|----------|--------|---------|
+| `AssetHolding` | Asset | Represents a digital asset held by an owner. Signatory: owner. |
+| `TransferRequest` | TransferWorkflow | Declares intent to transfer. Created by owner. Observer: recipient, compliance officer. |
+| `ComplianceReview` | Compliance | Records compliance officer's review checks. Signatory: compliance officer. |
+| `CompletedTransfer` | Settlement | Audit record of a settled transfer. Tri-party signatories. |
+| `RejectedTransfer` | Settlement | Audit record of a rejected transfer. Signatory: compliance officer. |
+| `TransferCancellation` | Settlement | Audit record of an owner-initiated cancellation. Signatory: owner. |
+| `ComplianceDecisionLog` | Settlement | Immutable compliance decision audit entry. Signatory: compliance officer. |
 
 ## Roles
 
 | Role | Responsibility |
 |------|----------------|
-| **Owner** | Holds the asset. Initiates transfer requests. |
+| **Owner** | Holds the asset. Initiates transfer requests. Can cancel pending requests. |
 | **Recipient** | Intended new holder. Observes request and review. |
 | **ComplianceOfficer** | Reviews transfer requests. Approves or rejects. |
 
-## Workflow
+## Domain Types
 
-### Step 1: Initiate Transfer Request
+- **AssetCategory**: Equity, Bond, Token, Derivative, Fund
+- **Jurisdiction**: US, EU, UK, APAC
+- **TransferPurpose**: Sale, Pledge, MarginCall, CorporateAction, Rebalancing, CollateralTransfer
+- **ComplianceDecision**: Approved, Rejected Text
 
-Owner exercises `RequestTransfer` on their `AssetHolding`. The `TransferRequest` is created but the original holding remains active.
+## Workflow Branches
 
-### Step 2: Record Compliance Review
-
-Compliance officer exercises `StartComplianceReview` on the `TransferRequest`. This creates a `ComplianceReview` contract capturing the three checks and notes.
-
-### Step 3: Compliance Decision
-
-Compliance officer exercises one of:
-
-- **`ApproveTransfer`**: Only valid when `kycConfirmed == True`, `transferLimitOk == True`, `blacklistCheckPassed == True`. Archives the original holding and request, creates a new holding for the recipient, and creates a `CompletedTransfer` record.
-- **`RejectTransfer`**: Archives the transfer request and creates a `RejectedTransfer` record. Original holding remains untouched.
-
-### Step 4: Settlement
-
-On approval, the recipient holds a new `AssetHolding` with the same `assetId`, `quantity`, and `assetType`. The `CompletedTransfer` record serves as the immutable settlement record.
-
-## Compliance Checks
-
-The `ComplianceReview` tracks three boolean checks:
-
-- **KYC Confirmed**: Know Your Customer verification completed for both parties
-- **Transfer Limit OK**: Recipient's allowable transfer limit not exceeded
-- **Blacklist Check Passed**: Neither party appears on sanctions or restricted lists
-
-Approval requires all three to be `True`. If any is `False`, the officer must reject.
-
-## Demo Scenarios
-
-### Approval Scenario (Happy Path)
+### Branch 1: Approval (Happy Path)
 
 ```
 Issuer → AssetHolding (Owner)
 Owner → RequestTransfer → TransferRequest
 ComplianceOfficer → StartComplianceReview → ComplianceReview
-ComplianceOfficer → ApproveTransfer → New AssetHolding (Recipient) + CompletedTransfer
+ComplianceOfficer → ApproveTransfer → New AssetHolding (Recipient) + CompletedTransfer + ComplianceDecisionLog
 ```
 
-**Outcome**: Recipient receives asset. `CompletedTransfer` created with tri-party signatures.
+**Outcome**: Recipient receives asset. `CompletedTransfer` created with tri-party signatures. `ComplianceDecisionLog` records the approval.
 
-### Rejection Scenario
+### Branch 2: Rejection
 
 ```
 Issuer → AssetHolding (Owner)
 Owner → RequestTransfer → TransferRequest
-ComplianceOfficer → StartComplianceReview → ComplianceReview (kycConfirmed: false)
-ComplianceOfficer → RejectTransfer → RejectedTransfer
+ComplianceOfficer → StartComplianceReview → ComplianceReview
+ComplianceOfficer → RejectTransfer → RejectedTransfer + ComplianceDecisionLog
 ```
 
-**Outcome**: Original holding stays with owner. No settlement. `RejectedTransfer` created.
+**Outcome**: Original holding stays with owner. No settlement. `RejectedTransfer` and `ComplianceDecisionLog` created.
+
+### Branch 3: Owner Cancellation
+
+```
+Issuer → AssetHolding (Owner)
+Owner → RequestTransfer → TransferRequest
+Owner → CancelTransfer → TransferCancellation
+```
+
+**Outcome**: Owner withdraws request before compliance decision. `TransferCancellation` created. Original holding remains.
+
+## Compliance Checks
+
+The `ComplianceReview` tracks mandatory boolean checks:
+
+- **KYC Confirmed**: Know Your Customer verification completed
+- **Transfer Limit OK**: Recipient's allowable limit not exceeded
+- **Blacklist Check Passed**: Not on restricted lists
+- **Sanctions Check Passed**: No sanctions matches
+
+Optional check:
+- **Regulatory Approval Obtained**: Required for certain asset types/jurisdictions
+
+Approval requires all mandatory checks to be `True`. If any is `False`, the officer must reject.
+
+## Audit Trail
+
+Every transfer decision creates an immutable record:
+
+- `CompletedTransfer`: Settlement confirmation with tri-party signatures
+- `RejectedTransfer`: Rejection with reason, timestamp, and reference
+- `TransferCancellation`: Owner cancellation with reason and timestamp
+- `ComplianceDecisionLog`: Compliance officer's decision with full audit context
 
 ## Why DAML Fits This Use Case
 
@@ -96,7 +107,7 @@ DAML is well-suited for compliance-gated workflows because:
 
 - **Explicit rights and roles**: Signatories and observers are explicit. No party can act outside their role.
 - **Conditional workflows**: Choices enforce business rules. Approval requires all checks to pass.
-- **Strong audit trail**: Every contract creation and exercise is recorded. `CompletedTransfer` and `RejectedTransfer` provide immutable records.
+- **Strong audit trail**: Every contract creation and exercise is recorded. Decision logs provide immutable compliance records.
 - **Controlled settlement logic**: Settlement happens atomically within `ApproveTransfer`. No intermediate states where the asset is in limbo.
 
 ## Showcase Phrases
@@ -111,7 +122,15 @@ DAML is well-suited for compliance-gated workflows because:
 ```bash
 daml build
 daml script --dar .daml/dist/*.dar --script-name Demo:runDemo
+daml script --dar .daml/dist/*.dar --script-name Scenarios:runAllScenarios
+daml script --dar .daml/dist/*.dar --script-name ExampleFlows:runAllFlows
 ```
+
+## Demo Files
+
+- **Demo.daml**: Core scenarios (approval, rejection, cancellation)
+- **Scenarios.daml**: Detailed scenarios with full audit verification
+- **ExampleFlows.daml**: Realistic business flow examples
 
 ## Project Structure
 
@@ -119,9 +138,16 @@ daml script --dar .daml/dist/*.dar --script-name Demo:runDemo
 digital-asset-transfer-with-compliance-hold/
 ├── daml.yaml
 ├── README.md
+├── .gitattributes
 └── daml/
-    ├── Main.daml
-    ├── Types.daml
-    ├── TransferWorkflow.daml
-    └── Demo.daml
+    ├── Main.daml              # Entry point
+    ├── Types.daml             # Shared type definitions
+    ├── Asset.daml             # AssetHolding template and domain types
+    ├── Compliance.daml        # ComplianceReview template and check types
+    ├── Settlement.daml        # Audit trail templates
+    ├── TransferWorkflow.daml   # TransferRequest template and workflow choices
+    ├── WorkflowHelpers.daml   # Helper functions
+    ├── Demo.daml              # Core demo scenarios
+    ├── Scenarios.daml         # Detailed test scenarios
+    └── ExampleFlows.daml      # Realistic business flow examples
 ```

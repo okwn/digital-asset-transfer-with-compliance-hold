@@ -1,0 +1,82 @@
+-- Compliance.daml
+-- Compliance domain types and review template.
+-- Contains only the ComplianceReview template and check types.
+
+module Compliance where
+
+-- =============================================================================
+-- COMPLIANCE CHECK TYPES
+-- =============================================================================
+
+data ComplianceCheck
+    = KycCheck
+    | TransferLimitCheck
+    | BlacklistCheck
+    | SanctionsCheck
+    | RegulatoryApprovalCheck
+    | JurisdictionCheck
+    deriving (Eq, Show)
+
+data CheckStatus
+    = CheckPassed
+    | CheckFailed Text
+    deriving (Eq, Show)
+
+data ComplianceResult
+    = ResultPass
+    | ResultFail (NonEmpty Text)
+    deriving (Eq, Show)
+
+-- =============================================================================
+-- COMPLIANCE REVIEW
+-- =============================================================================
+
+template ComplianceReview
+    with
+        owner : Party
+        recipient : Party
+        complianceOfficer : Party
+        requestId : Text
+        assetId : Text
+        assetType : Text
+        quantity : Decimal
+        issuer : Party
+        assetCategory : AssetCategory
+        jurisdiction : Jurisdiction
+        riskFlag : Bool
+        kycConfirmed : Bool
+        transferLimitOk : Bool
+        blacklistCheckPassed : Bool
+        sanctionsCheckPassed : Bool
+        regulatoryApprovalObtained : Bool
+        notes : Text
+    where
+        signatory complianceOfficer
+        observer owner
+        observer recipient
+
+-- =============================================================================
+-- COMPLIANCE HELPERS
+-- =============================================================================
+
+interpretCheck : Text -> Bool -> CheckStatus
+interpretCheck _ True = CheckPassed
+interpretCheck reason False = CheckFailed reason
+
+combineResults : [CheckStatus] -> ComplianceResult
+combineResults checks =
+    let failures = [msg | CheckFailed msg <- checks]
+    in
+        if null failures
+        then ResultPass
+        else ResultFail (toNonEmpty failures)
+
+allMandatoryChecksPassed : Bool -> Bool -> Bool -> Bool -> Bool
+allMandatoryChecksPassed kyc transferLimit blacklist sanctions =
+    kyc && transferLimit && blacklist && sanctions
+
+formatComplianceSummary : [CheckStatus] -> Text
+formatComplianceSummary checks =
+    let passed = length [() | CheckPassed <- checks]
+        total = length checks
+    in "Compliance checks: " <> show passed <> "/" <> show total <> " passed"

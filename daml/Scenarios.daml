@@ -1,0 +1,418 @@
+-- Scenarios.daml
+-- Detailed demonstration scenarios for the compliance-gated asset transfer workflow.
+-- This module contains comprehensive scenarios covering various workflow paths.
+
+module Scenarios where
+
+import Daml.Script
+import Asset
+import Compliance
+import Settlement
+import TransferWorkflow
+import WorkflowHelpers
+
+-- =============================================================================
+-- SCENARIO 1: FULL APPROVAL PATH
+-- =============================================================================
+-- Demonstrates a complete happy path: asset creation through settlement.
+-- Proves: Compliance gating enforces explicit approval before any transfer.
+
+scenarioFullApprovalPath : Script ()
+scenarioFullApprovalPath = do
+    -- Setup: Allocate parties representing the business scenario
+    issuer <- allocateParty "CentralBank"       -- Asset issuer/regulator
+    owner <- allocateParty "AssetOwner"        -- Current holder
+    recipient <- allocateParty "AssetRecipient" -- Intended new holder
+    complianceOfficer <- allocateParty "ComplianceOfficer"
+
+    now <- getTime
+
+    -- Step 1: Issuer creates an asset holding for the owner
+    -- The asset is now under owner's control on the ledger
+    assetHoldingCid <- submit issuer do
+        createCmd AssetHolding
+            with
+                owner = owner
+                assetId = "SEC-2024-001"
+                assetType = "Government Bond"
+                quantity = 10000.0
+                issuer = issuer
+                metadata = "10-year fixed rate government bond"
+                assetCategory = Bond
+                jurisdiction = UK
+                riskFlag = False
+                createdAt = now
+
+    -- Step 2: Owner initiates a transfer request to the recipient
+    -- The request declares intent but does NOT transfer the asset
+    transferRequestCid <- submit owner do
+        exerciseCmd assetHoldingCid RequestTransfer
+            with
+                recipient = recipient
+                complianceOfficer = complianceOfficer
+                reason = "Sale to reduce bond portfolio concentration"
+                requestId = "TRF-UK-2024-001"
+                transferPurpose = Sale
+                complianceCaseReference = Some "KYB-2024-REF-001"
+                requestTimestamp = now
+
+    -- Step 3: Compliance officer reviews and records compliance checks
+    -- All mandatory checks pass for this regulated bond transfer
+    complianceReviewCid <- submit complianceOfficer do
+        exerciseCmd transferRequestCid StartComplianceReview
+            with
+                kycConfirmed = True
+                transferLimitOk = True
+                blacklistCheckPassed = True
+                sanctionsCheckPassed = True
+                regulatoryApprovalObtained = True
+                notes = "UK regulatory bond transfer. KYC verified for both parties. Transfer limits within threshold."
+
+    -- Step 4: Compliance officer approves the transfer
+    -- This is the compliance gate: settlement only occurs after this choice
+    (newHoldingCid, completedCid, decisionLogCid) <- submit complianceOfficer do
+        exerciseCmd transferRequestCid ApproveTransfer
+            with
+                complianceReviewCid = complianceReviewCid
+                settlementNote = "UK bond transfer approved. Settlement confirmed."
+                settlementTimestamp = now
+                settlementReference = "SETL-UK-2024-001"
+                decisionReference = "DECISION-UK-2024-001"
+
+    -- Verify: Recipient now holds the asset
+    newHolding <- queryContractId recipient newHoldingCid
+    assert (newHolding /= None) <?> "Recipient must receive new holding after approval"
+
+    -- Verify: Compliance decision is recorded
+    decisionLogs <- query @ComplianceDecisionLog complianceOfficer
+    assert (length decisionLogs == 1) <?> "Compliance decision log must exist"
+
+    pure ()
+
+-- =============================================================================
+-- SCENARIO 2: REJECTION DUE TO SANCTIONS
+-- =============================================================================
+-- Demonstrates rejection when sanctions screening fails.
+-- Proves: Transfers are blocked when regulatory checks fail.
+
+scenarioRejectionDueToSanctions : Script ()
+scenarioRejectionDueToSanctions = do
+    issuer <- allocateParty "Issuer"
+    owner <- allocateParty "Owner"
+    recipient <- allocateParty "Recipient"
+    complianceOfficer <- allocateParty "ComplianceOfficer"
+
+    now <- getTime
+
+    -- Owner holds a regulated security
+    assetHoldingCid <- submit issuer do
+        createCmd AssetHolding
+            with
+                owner = owner
+                assetId = "SANCTIONED-ASSET-001"
+                assetType = "Equity Share"
+                quantity = 500.0
+                issuer = issuer
+                metadata = "Equity in publicly traded company"
+                assetCategory = Equity
+                jurisdiction = EU
+                riskFlag = False
+                createdAt = now
+
+    -- Owner requests transfer
+    transferRequestCid <- submit owner do
+        exerciseCmd assetHoldingCid RequestTransfer
+            with
+                recipient = recipient
+                complianceOfficer = complianceOfficer
+                reason = "Portfolio diversification"
+                requestId = "TRF-EU-2024-002"
+                transferPurpose = Rebalancing
+                complianceCaseReference = Some "CC-EU-2024-002"
+                requestTimestamp = now
+
+    -- Compliance review reveals sanctions match
+    complianceReviewCid <- submit complianceOfficer do
+        exerciseCmd transferRequestCid StartComplianceReview
+            with
+                kycConfirmed = True
+                transferLimitOk = True
+                blacklistCheckPassed = True
+                sanctionsCheckPassed = False
+                regulatoryApprovalObtained = True
+                notes = "Recipient appears on EU sanctions list. Transfer blocked."
+
+    -- Compliance rejects the transfer
+    (rejectedCid, decisionLogCid) <- submit complianceOfficer do
+        exerciseCmd transferRequestCid RejectTransfer
+            with
+                complianceReviewCid = complianceReviewCid
+                rejectionReason = "Sanctions match: Recipient is on EU consolidated sanctions list"
+                rejectionTimestamp = now
+                rejectionReference = "REJ-EU-2024-002"
+                decisionReference = "DECISION-EU-2024-002"
+
+    -- Verify: Original holding remains with owner (asset not transferred)
+    originalHolding <- queryContractId owner assetHoldingCid
+    assert (originalHolding /= None) <?> "Original holding must remain when transfer rejected"
+
+    -- Verify: No settlement occurred
+    completedTransfers <- query @CompletedTransfer recipient
+    assert (length completedTransfers == 0) <?> "No completed transfer when rejected"
+
+    -- Verify: Rejection audit record exists
+    rejectedTransfers <- query @RejectedTransfer complianceOfficer
+    assert (length rejectedTransfers == 1) <?> "Rejection record must exist"
+
+    pure ()
+
+-- =============================================================================
+-- SCENARIO 3: OWNER CANCELLATION BEFORE REVIEW
+-- =============================================================================
+-- Demonstrates owner withdrawing a request before compliance review.
+-- Proves: Owner retains control and can withdraw intent before compliance gate.
+
+scenarioOwnerCancellationBeforeReview : Script ()
+scenarioOwnerCancellationBeforeReview = do
+    issuer <- allocateParty "Issuer"
+    owner <- allocateParty "Owner"
+    recipient <- allocateParty "Recipient"
+    complianceOfficer <- allocateParty "ComplianceOfficer"
+
+    now <- getTime
+
+    -- Owner holds an asset
+    assetHoldingCid <- submit issuer do
+        createCmd AssetHolding
+            with
+                owner = owner
+                assetId = "TOKEN-001"
+                assetType = "Utility Token"
+                quantity = 1000.0
+                issuer = issuer
+                metadata = "Platform utility token"
+                assetCategory = Token
+                jurisdiction = US
+                riskFlag = False
+                createdAt = now
+
+    -- Owner initiates transfer request
+    transferRequestCid <- submit owner do
+        exerciseCmd assetHoldingCid RequestTransfer
+            with
+                recipient = recipient
+                complianceOfficer = complianceOfficer
+                reason = "Wallet migration to new address"
+                requestId = "TRF-US-2024-003"
+                transferPurpose = Sale
+                complianceCaseReference = None
+                requestTimestamp = now
+
+    -- Owner changes mind and cancels before compliance review begins
+    -- This is allowed because no compliance decision has been made
+    cancellationCid <- submit owner do
+        exerciseCmd transferRequestCid CancelTransfer
+            with
+                cancellationReason = "Recipient address was incorrect - will resubmit with correct address"
+                cancellationTimestamp = now
+                cancellationReference = "CANC-US-2024-003"
+
+    -- Verify: Original holding still with owner
+    originalHolding <- queryContractId owner assetHoldingCid
+    assert (originalHolding /= None) <?> "Original holding must remain after owner cancellation"
+
+    -- Verify: Cancellation record created
+    cancellations <- query @TransferCancellation owner
+    assert (length cancellations == 1) <?> "Cancellation record must exist"
+
+    -- Verify: No compliance decision was made
+    decisionLogs <- query @ComplianceDecisionLog complianceOfficer
+    assert (length decisionLogs == 0) <?> "No decision log when owner cancels before review"
+
+    pure ()
+
+-- =============================================================================
+-- SCENARIO 4: MULTI-CHECK FAILURE
+-- =============================================================================
+-- Demonstrates rejection when multiple compliance checks fail.
+-- Proves: All checks are enforced; approval requires all to pass.
+
+scenarioMultiCheckFailure : Script ()
+scenarioMultiCheckFailure = do
+    issuer <- allocateParty "Issuer"
+    owner <- allocateParty "Owner"
+    recipient <- allocateParty "Recipient"
+    complianceOfficer <- allocateParty "ComplianceOfficer"
+
+    now <- getTime
+
+    assetHoldingCid <- submit issuer do
+        createCmd AssetHolding
+            with
+                owner = owner
+                assetId = "HIGH-RISK-001"
+                assetType = "Derivative Instrument"
+                quantity = 100.0
+                issuer = issuer
+                metadata = "Complex derivative - high risk classification"
+                assetCategory = Derivative
+                jurisdiction = APAC
+                riskFlag = True
+                createdAt = now
+
+    transferRequestCid <- submit owner do
+        exerciseCmd assetHoldingCid RequestTransfer
+            with
+                recipient = recipient
+                complianceOfficer = complianceOfficer
+                reason = "Transfer to subsidiary for hedging"
+                requestId = "TRF-APAC-2024-001"
+                transferPurpose = MarginCall
+                complianceCaseReference = Some "CC-APAC-2024-001"
+                requestTimestamp = now
+
+    -- Multiple checks fail: KYC, transfer limit, and blacklist
+    complianceReviewCid <- submit complianceOfficer do
+        exerciseCmd transferRequestCid StartComplianceReview
+            with
+                kycConfirmed = False
+                transferLimitOk = False
+                blacklistCheckPassed = True
+                sanctionsCheckPassed = True
+                regulatoryApprovalObtained = False
+                notes = "Multiple failures: KYC incomplete, transfer exceeds limit, regulatory approval not obtained."
+
+    (rejectedCid, decisionLogCid) <- submit complianceOfficer do
+        exerciseCmd transferRequestCid RejectTransfer
+            with
+                complianceReviewCid = complianceReviewCid
+                rejectionReason = "Multiple compliance failures: KYC incomplete, transfer exceeds recipient limit, regulatory approval not obtained for APAC derivative transfer"
+                rejectionTimestamp = now
+                rejectionReference = "REJ-APAC-2024-001"
+                decisionReference = "DECISION-APAC-2024-001"
+
+    originalHolding <- queryContractId owner assetHoldingCid
+    assert (originalHolding /= None) <?> "Original holding must remain"
+
+    completedTransfers <- query @CompletedTransfer recipient
+    assert (length completedTransfers == 0) <?> "No settlement on multi-check failure"
+
+    rejectedTransfers <- query @RejectedTransfer complianceOfficer
+    assert (length rejectedTransfers == 1) <?> "Rejection record must exist"
+
+    pure ()
+
+-- =============================================================================
+-- SCENARIO 5: RISK-FLAGGED ASSET TRANSFER
+-- =============================================================================
+-- Demonstrates transfer of a high-risk flagged asset that requires enhanced review.
+-- Proves: Risk flags are tracked and visible but still require explicit approval.
+
+scenarioRiskFlaggedAssetTransfer : Script ()
+scenarioRiskFlaggedAssetTransfer = do
+    issuer <- allocateParty "Issuer"
+    owner <- allocateParty "Owner"
+    recipient <- allocateParty "Recipient"
+    complianceOfficer <- allocateParty "ComplianceOfficer"
+
+    now <- getTime
+
+    -- Create a high-risk flagged asset
+    assetHoldingCid <- submit issuer do
+        createCmd AssetHolding
+            with
+                owner = owner
+                assetId = "LEVERAGE-001"
+                assetType = "Leveraged Derivative"
+                quantity = 25.0
+                issuer = issuer
+                metadata = "10x leveraged derivative product - restricted"
+                assetCategory = Derivative
+                jurisdiction = EU
+                riskFlag = True
+                createdAt = now
+
+    transferRequestCid <- submit owner do
+        exerciseCmd assetHoldingCid RequestTransfer
+            with
+                recipient = recipient
+                complianceOfficer = complianceOfficer
+                reason = "Transfer of leveraged position to prime broker"
+                requestId = "TRF-EU-LEVERAGED-001"
+                transferPurpose = CollateralTransfer
+                complianceCaseReference = Some "CC-EU-LEVERAGED-001"
+                requestTimestamp = now
+
+    -- Enhanced compliance review for high-risk asset
+    complianceReviewCid <- submit complianceOfficer do
+        exerciseCmd transferRequestCid StartComplianceReview
+            with
+                kycConfirmed = True
+                transferLimitOk = True
+                blacklistCheckPassed = True
+                sanctionsCheckPassed = True
+                regulatoryApprovalObtained = True
+                notes = "High-risk leveraged derivative. Enhanced review completed. All checks passed. Requires ongoing monitoring."
+
+    (newHoldingCid, completedCid, decisionLogCid) <- submit complianceOfficer do
+        exerciseCmd transferRequestCid ApproveTransfer
+            with
+                complianceReviewCid = complianceReviewCid
+                settlementNote = "High-risk leveraged derivative transfer approved. Enhanced due diligence completed."
+                settlementTimestamp = now
+                settlementReference = "SETL-EU-LEVERAGED-001"
+                decisionReference = "DECISION-EU-LEVERAGED-001"
+
+    newHolding <- queryContractId recipient newHoldingCid
+    assert (newHolding /= None) <?> "Recipient must receive high-risk asset after approval"
+
+    completedTransfers <- query @CompletedTransfer recipient
+    assert (length completedTransfers == 1) <?> "Completed transfer record must exist"
+
+    pure ()
+
+-- =============================================================================
+-- RUN ALL SCENARIOS
+-- =============================================================================
+
+runAllScenarios : Script ()
+runAllScenarios = do
+    putStrLn "========================================"
+    putStrLn "SCENARIO 1: Full Approval Path"
+    putStrLn "========================================"
+    scenarioFullApprovalPath
+    putStrLn "PASSED"
+    putStrLn ""
+
+    putStrLn "========================================"
+    putStrLn "SCENARIO 2: Rejection Due to Sanctions"
+    putStrLn "========================================"
+    scenarioRejectionDueToSanctions
+    putStrLn "PASSED"
+    putStrLn ""
+
+    putStrLn "========================================"
+    putStrLn "SCENARIO 3: Owner Cancellation Before Review"
+    putStrLn "========================================"
+    scenarioOwnerCancellationBeforeReview
+    putStrLn "PASSED"
+    putStrLn ""
+
+    putStrLn "========================================"
+    putStrLn "SCENARIO 4: Multi-Check Failure"
+    putStrLn "========================================"
+    scenarioMultiCheckFailure
+    putStrLn "PASSED"
+    putStrLn ""
+
+    putStrLn "========================================"
+    putStrLn "SCENARIO 5: Risk-Flagged Asset Transfer"
+    putStrLn "========================================"
+    scenarioRiskFlaggedAssetTransfer
+    putStrLn "PASSED"
+    putStrLn ""
+
+    putStrLn "========================================"
+    putStrLn "ALL SCENARIOS COMPLETED"
+    putStrLn "========================================"
+    pure ()

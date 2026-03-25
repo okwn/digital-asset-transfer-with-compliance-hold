@@ -1,140 +1,217 @@
 -- Demo.daml
 -- End-to-end demonstration of the compliance-gated asset transfer workflow.
--- Run with: daml script --dar . --input-file daml/Demo.daml
+-- Run with: daml script --dar .daml/dist/*.dar --script-name Demo:runDemo
 
 module Demo where
 
 import Daml.Script
+import Asset
+import Compliance
+import Settlement
 import TransferWorkflow
+import WorkflowHelpers
 
 -- =============================================================================
 -- APPROVAL SCENARIO
 -- =============================================================================
--- Demonstrates a successful transfer where all compliance checks pass.
 
 approvalScenario : Script ()
 approvalScenario = do
-    -- Allocate parties
     issuer <- allocateParty "Issuer"
     owner <- allocateParty "Owner"
     recipient <- allocateParty "Recipient"
     complianceOfficer <- allocateParty "ComplianceOfficer"
 
-    -- Step 1: Issuer creates an initial AssetHolding for the owner
+    now <- getTime
+
     assetHoldingCid <- submit issuer do
         createCmd AssetHolding
             with
                 owner = owner
                 assetId = "ASSET-001"
-                assetType = "Security"
+                assetType = "US Equity"
                 quantity = 100.0
                 issuer = issuer
-                metadata = "Tradable security asset"
+                metadata = "Restricted equity token"
+                assetCategory = Equity
+                jurisdiction = US
+                riskFlag = False
+                createdAt = now
 
-    -- Step 2: Owner requests transfer to recipient
     transferRequestCid <- submit owner do
         exerciseCmd assetHoldingCid RequestTransfer
             with
                 recipient = recipient
                 complianceOfficer = complianceOfficer
-                reason = "Portfolio rebalancing"
+                reason = "Portfolio rebalancing - risk reduction"
                 requestId = "REQ-001"
+                transferPurpose = Rebalancing
+                complianceCaseReference = Some "CC-REQ-001-CO"
+                requestTimestamp = now
 
-    -- Step 3: ComplianceOfficer starts compliance review
     complianceReviewCid <- submit complianceOfficer do
         exerciseCmd transferRequestCid StartComplianceReview
             with
                 kycConfirmed = True
                 transferLimitOk = True
                 blacklistCheckPassed = True
-                notes = "All checks passed. Transfer approved."
-                assetHoldingCid = assetHoldingCid
-                transferRequestCid = transferRequestCid
+                sanctionsCheckPassed = True
+                regulatoryApprovalObtained = True
+                notes = "All compliance checks passed. Transfer approved."
 
-    -- Step 4: ComplianceOfficer approves the transfer
-    (newHoldingCid, completedCid) <- submit complianceOfficer do
-        exerciseCmd complianceReviewCid ApproveTransfer
+    (newHoldingCid, completedCid, decisionLogCid) <- submit complianceOfficer do
+        exerciseCmd transferRequestCid ApproveTransfer
             with
-                settlementNote = "Transfer settled after compliance approval."
+                complianceReviewCid = complianceReviewCid
+                settlementNote = "Transfer settled after compliance approval. All mandatory checks passed."
+                settlementTimestamp = now
+                settlementReference = "SET-REQ-001-" <> show now
+                decisionReference = "DEC-REQ-001-" <> show now
 
-    -- Verify the new holding exists for the recipient
     newHolding <- queryContractId recipient newHoldingCid
     assert (newHolding /= None) <?> "Recipient should have a new holding"
 
-    -- Verify CompletedTransfer was created
     completedTransfers <- query @CompletedTransfer recipient
     assert (length completedTransfers == 1) <?> "Should have one completed transfer"
+
+    decisionLogs <- query @ComplianceDecisionLog complianceOfficer
+    assert (length decisionLogs == 1) <?> "Should have one compliance decision log"
 
     pure ()
 
 -- =============================================================================
 -- REJECTION SCENARIO
 -- =============================================================================
--- Demonstrates a rejected transfer where compliance checks fail.
 
 rejectionScenario : Script ()
 rejectionScenario = do
-    -- Allocate parties
     issuer <- allocateParty "Issuer"
     owner <- allocateParty "Owner"
     recipient <- allocateParty "Recipient"
     complianceOfficer <- allocateParty "ComplianceOfficer"
 
-    -- Step 1: Issuer creates an initial AssetHolding for the owner
+    now <- getTime
+
     assetHoldingCid <- submit issuer do
         createCmd AssetHolding
             with
                 owner = owner
                 assetId = "ASSET-002"
-                assetType = "Security"
+                assetType = "EU Bond"
                 quantity = 100.0
                 issuer = issuer
-                metadata = "Tradable security asset"
+                metadata = "EU regulatory bond"
+                assetCategory = Bond
+                jurisdiction = EU
+                riskFlag = True
+                createdAt = now
 
-    -- Step 2: Owner requests transfer to recipient
     transferRequestCid <- submit owner do
         exerciseCmd assetHoldingCid RequestTransfer
             with
                 recipient = recipient
                 complianceOfficer = complianceOfficer
-                reason = "Portfolio rebalancing"
+                reason = "Collateral transfer"
                 requestId = "REQ-002"
+                transferPurpose = CollateralTransfer
+                complianceCaseReference = Some "CC-REQ-002-CO"
+                requestTimestamp = now
 
-    -- Step 3: ComplianceOfficer starts compliance review
     complianceReviewCid <- submit complianceOfficer do
         exerciseCmd transferRequestCid StartComplianceReview
             with
                 kycConfirmed = False
                 transferLimitOk = True
                 blacklistCheckPassed = True
-                notes = "KYC check failed - recipient identity not verified."
-                assetHoldingCid = assetHoldingCid
-                transferRequestCid = transferRequestCid
+                sanctionsCheckPassed = True
+                regulatoryApprovalObtained = True
+                notes = "KYC check failed - recipient identity not fully verified per EU regulations."
 
-    -- Step 4: ComplianceOfficer rejects the transfer
-    _ <- submit complianceOfficer do
-        exerciseCmd complianceReviewCid RejectTransfer
+    (rejectedCid, decisionLogCid) <- submit complianceOfficer do
+        exerciseCmd transferRequestCid RejectTransfer
             with
-                rejectionReason = "KYC verification failed"
+                complianceReviewCid = complianceReviewCid
+                rejectionReason = "KYC verification failed - cannot proceed under EU AML regulations"
+                rejectionTimestamp = now
+                rejectionReference = "REJ-REQ-002-" <> show now
+                decisionReference = "DEC-REQ-002-" <> show now
 
-    -- Verify the original holding still exists for the owner
     originalHolding <- queryContractId owner assetHoldingCid
     assert (originalHolding /= None) <?> "Original holding should remain with owner"
 
-    -- Verify no CompletedTransfer was created
     completedTransfers <- query @CompletedTransfer recipient
     assert (length completedTransfers == 0) <?> "No completed transfer should exist"
 
-    -- Verify RejectedTransfer was created
     rejectedTransfers <- query @RejectedTransfer complianceOfficer
     assert (length rejectedTransfers == 1) <?> "Should have one rejected transfer record"
+
+    decisionLogs <- query @ComplianceDecisionLog complianceOfficer
+    assert (length decisionLogs == 1) <?> "Should have one compliance decision log"
+
+    pure ()
+
+-- =============================================================================
+-- CANCELLATION SCENARIO
+-- =============================================================================
+
+cancellationScenario : Script ()
+cancellationScenario = do
+    issuer <- allocateParty "Issuer"
+    owner <- allocateParty "Owner"
+    recipient <- allocateParty "Recipient"
+    complianceOfficer <- allocateParty "ComplianceOfficer"
+
+    now <- getTime
+
+    assetHoldingCid <- submit issuer do
+        createCmd AssetHolding
+            with
+                owner = owner
+                assetId = "ASSET-003"
+                assetType = "Token"
+                quantity = 50.0
+                issuer = issuer
+                metadata = "Utility token"
+                assetCategory = Token
+                jurisdiction = US
+                riskFlag = False
+                createdAt = now
+
+    transferRequestCid <- submit owner do
+        exerciseCmd assetHoldingCid RequestTransfer
+            with
+                recipient = recipient
+                complianceOfficer = complianceOfficer
+                reason = "Initial transfer to new wallet"
+                requestId = "REQ-003"
+                transferPurpose = Sale
+                complianceCaseReference = None
+                requestTimestamp = now
+
+    cancellationCid <- submit owner do
+        exerciseCmd transferRequestCid CancelTransfer
+            with
+                cancellationReason = "Recipient wallet address changed - will resubmit with correct address"
+                cancellationTimestamp = now
+                cancellationReference = "CAN-REQ-003-" <> show now
+
+    originalHolding <- queryContractId owner assetHoldingCid
+    assert (originalHolding /= None) <?> "Original holding should remain with owner after cancellation"
+
+    cancellations <- query @TransferCancellation owner
+    assert (length cancellations == 1) <?> "Should have one cancellation record"
+
+    completedTransfers <- query @CompletedTransfer recipient
+    assert (length completedTransfers == 0) <?> "No completed transfer should exist"
+
+    rejectedTransfers <- query @RejectedTransfer complianceOfficer
+    assert (length rejectedTransfers == 0) <?> "No rejected transfer should exist"
 
     pure ()
 
 -- =============================================================================
 -- FULL DEMO SCRIPT
 -- =============================================================================
--- Runs both scenarios sequentially.
 
 runDemo : Script ()
 runDemo = do
@@ -150,6 +227,13 @@ runDemo = do
     putStrLn "========================================"
     rejectionScenario
     putStrLn "Rejection scenario completed successfully."
+    putStrLn ""
+
+    putStrLn "========================================"
+    putStrLn "CANCELLATION SCENARIO"
+    putStrLn "========================================"
+    cancellationScenario
+    putStrLn "Cancellation scenario completed successfully."
     putStrLn ""
 
     putStrLn "========================================"

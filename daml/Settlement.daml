@@ -1,0 +1,139 @@
+-- Settlement.daml
+-- Settlement records and audit trail templates.
+
+module Settlement where
+
+-- =============================================================================
+-- COMPLETED TRANSFER
+-- =============================================================================
+-- Records a successful transfer for audit and settlement confirmation.
+-- Created when ApproveTransfer succeeds.
+-- Tri-party signatories ensure all parties acknowledge the settlement.
+
+template CompletedTransfer
+    with
+        previousOwner : Party
+        newOwner : Party
+        complianceOfficer : Party
+        assetId : Text
+        assetType : Text
+        quantity : Decimal
+        issuer : Party
+        requestId : Text
+        settlementNote : Text
+        assetCategory : AssetCategory
+        jurisdiction : Jurisdiction
+        settlementTimestamp : Time
+        settlementReference : Text
+    where
+        signatory previousOwner, newOwner, complianceOfficer
+
+-- =============================================================================
+-- REJECTED TRANSFER
+-- =============================================================================
+-- Records a rejected transfer for audit trail.
+-- Created when RejectTransfer is exercised by compliance officer.
+-- The original AssetHolding remains with the owner.
+
+template RejectedTransfer
+    with
+        owner : Party
+        recipient : Party
+        complianceOfficer : Party
+        assetId : Text
+        assetType : Text
+        quantity : Decimal
+        issuer : Party
+        requestId : Text
+        rejectionReason : Text
+        rejectionTimestamp : Time
+        rejectionReference : Text
+        complianceReviewNotes : Text
+    where
+        signatory complianceOfficer
+        observer owner
+        observer recipient
+
+-- =============================================================================
+-- TRANSFER CANCELLATION
+-- =============================================================================
+-- Records an owner-initiated cancellation of a pending transfer request.
+-- Created when the owner cancels before compliance makes a decision.
+-- The original AssetHolding remains active.
+
+template TransferCancellation
+    with
+        owner : Party
+        recipient : Party
+        complianceOfficer : Party
+        assetId : Text
+        requestId : Text
+        cancellationReason : Text
+        cancellationTimestamp : Time
+        cancellationReference : Text
+    where
+        signatory owner
+        observer recipient
+        observer complianceOfficer
+
+-- =============================================================================
+-- COMPLIANCE DECISION LOG
+-- =============================================================================
+-- Immutable audit record of a compliance decision.
+-- Created whenever compliance officer exercises ApproveTransfer or RejectTransfer.
+-- Provides regulators a complete record of compliance decisions.
+
+template ComplianceDecisionLog
+    with
+        complianceOfficer : Party
+        owner : Party
+        recipient : Party
+        requestId : Text
+        assetId : Text
+        decision : ComplianceDecision
+        decisionTimestamp : Time
+        decisionReference : Text
+        notes : Text
+    where
+        signatory complianceOfficer
+        observer owner
+        observer recipient
+
+-- | Type-safe representation of a compliance decision
+data ComplianceDecision
+    = Approved
+    | Rejected Text
+    deriving (Eq, Show)
+
+-- =============================================================================
+-- SETTLEMENT HELPERS
+-- =============================================================================
+
+generateSettlementNote : Text -> Text -> Text -> Text
+generateSettlementNote requestId assetType outcome =
+    "Transfer " <> requestId <> " of asset type " <> assetType <> " - " <> outcome
+
+formatSettlementConfirmation : Party -> Party -> Decimal -> Text -> Text
+formatSettlementConfirmation from to qty assetId =
+    "Settled: " <> show qty <> " units of " <> assetId <> " from " <> show from <> " to " <> show to
+
+formatRejectionReason : Text -> Text
+formatRejectionReason reason = "Rejected: " <> reason
+
+isValidSettlementNote : Text -> Bool
+isValidSettlementNote note = not (Text.isEmpty note)
+
+-- | Generates a unique settlement reference
+generateSettlementReference : Text -> Text -> Text
+generateSettlementReference requestId timestamp =
+    "SET-" <> requestId <> "-" <> timestamp
+
+-- | Generates a rejection reference
+generateRejectionReference : Text -> Text -> Text
+generateRejectionReference requestId timestamp =
+    "REJ-" <> requestId <> "-" <> timestamp
+
+-- | Generates a cancellation reference
+generateCancellationReference : Text -> Text -> Text
+generateCancellationReference requestId timestamp =
+    "CAN-" <> requestId <> "-" <> timestamp
