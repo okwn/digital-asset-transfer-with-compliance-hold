@@ -1,0 +1,7 @@
+sdk_version: "2.9.0"
+name: digital-asset-transfer-with-compliance-hold
+version: 0.1.0
+source: daml
+dependencies:
+  - daml-stdlib
+  - daml-prim

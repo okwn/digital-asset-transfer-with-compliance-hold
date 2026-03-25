@@ -1,0 +1,8 @@
+-- Main.daml
+-- Digital Asset Transfer with Compliance Hold
+-- Entry point for the DAML model.
+
+module Main where
+
+import Types
+import TransferWorkflow

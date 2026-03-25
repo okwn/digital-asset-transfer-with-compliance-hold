@@ -1,0 +1,7 @@
+-- Types.daml
+-- Shared type definitions for the digital asset transfer workflow.
+
+module Types where
+
+-- Note: Custom types used in this project are defined directly within
+-- their respective templates for clarity. See TransferWorkflow.daml.
