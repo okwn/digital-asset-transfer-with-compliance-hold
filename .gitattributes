@@ -1,0 +1,3 @@
+*.daml linguist-language=DAML
+*.md linguist-documentation
+daml.yaml linguist-documentation
